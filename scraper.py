@@ -257,7 +257,7 @@ def analyze_with_gemini(text: str, post_url: str, source_name: str) -> Optional[
     try:
         genai.configure(api_key=GEMINI_API_KEY)
         model = genai.GenerativeModel(
-            model_name="gemini-1.5-flash",
+            model_name="gemini-1.5-flash-latest",
             system_instruction=GEMINI_SYSTEM_PROMPT,
         )
 
@@ -402,6 +402,11 @@ def fetch_post_attachments(
                     file_url = href
                 else:
                     file_url = base_url + "/" + href
+                    
+                # 뷰어/미리보기 링크 제외
+                if any(exclude_kw in file_url.lower() for exclude_kw in ["preimagefromdoc", "viewer", "preview"]):
+                    continue
+                    
                 attachment_urls.append(file_url)
 
         # onclick 속성에서 다운로드 URL 추출
@@ -415,9 +420,16 @@ def fetch_post_attachments(
                 )
                 for u in found:
                     if u.startswith("/"):
-                        attachment_urls.append(base_url + u)
+                        file_url = base_url + u
                     elif u.startswith("http"):
-                        attachment_urls.append(u)
+                        file_url = u
+                    else:
+                        continue
+                        
+                    if any(exclude_kw in file_url.lower() for exclude_kw in ["preimagefromdoc", "viewer", "preview"]):
+                        continue
+                        
+                    attachment_urls.append(file_url)
 
         log.info(f"  첨부파일 {len(set(attachment_urls))}개 발견")
 
