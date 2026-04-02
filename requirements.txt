@@ -1,0 +1,21 @@
+# 지자체 공고 수집 파이프라인 의존성
+# 설치: pip install -r requirements.txt
+
+# HTTP 요청 및 HTML 파싱
+requests==2.31.0
+beautifulsoup4==4.12.3
+lxml==5.2.1
+
+# PDF 텍스트 추출
+pdfplumber==0.11.0
+pdfminer.six==20231228
+
+# HWP 파일 처리
+pyhwp==0.1b12
+olefile==0.47
+
+# Google Gemini AI API
+google-generativeai==0.7.2
+
+# 유틸리티
+chardet==5.2.0
