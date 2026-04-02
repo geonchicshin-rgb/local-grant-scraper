@@ -11,6 +11,9 @@ import json
 import logging
 import tempfile
 import time
+import zipfile
+import xml.etree.ElementTree as ET
+import urllib3
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -19,6 +22,8 @@ import requests
 from bs4 import BeautifulSoup
 import pdfplumber
 import google.generativeai as genai
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # ──────────────────────────────────────────────
 # 로깅 설정
@@ -183,6 +188,33 @@ def extract_text_from_hwp(file_bytes: bytes) -> Optional[str]:
 
 
 # ──────────────────────────────────────────────
+# HWPX 텍스트 추출
+# ──────────────────────────────────────────────
+
+def extract_text_from_hwpx(file_bytes: bytes) -> Optional[str]:
+    """HWPX 파일(ZIP-XML)에서 텍스트를 추출합니다."""
+    try:
+        with zipfile.ZipFile(io.BytesIO(file_bytes)) as zf:
+            text_parts = []
+            for item in zf.namelist():
+                if item.startswith("Contents/section") and item.endswith(".xml"):
+                    xml_content = zf.read(item)
+                    tree = ET.fromstring(xml_content)
+                    for elem in tree.iter():
+                        if elem.tag.endswith('}t') and elem.text:
+                            text_parts.append(elem.text)
+            if text_parts:
+                log.info("HWPX 텍스트 추출 성공")
+                return "\n".join(text_parts)
+            else:
+                log.warning("HWPX에서 추출된 텍스트가 없습니다.")
+                return None
+    except Exception as e:
+        log.error(f"HWPX 텍스트 추출 중 오류: {e}")
+        return None
+
+
+# ──────────────────────────────────────────────
 # PDF 텍스트 추출
 # ──────────────────────────────────────────────
 
@@ -229,6 +261,8 @@ def download_and_extract(file_url: str, session: requests.Session) -> Optional[s
 
         if url_lower.endswith(".pdf") or "pdf" in content_type or ".pdf" in cd:
             return extract_text_from_pdf(file_bytes)
+        elif url_lower.endswith(".hwpx") or "hwpx" in content_type or ".hwpx" in cd:
+            return extract_text_from_hwpx(file_bytes)
         elif (url_lower.endswith(".hwp") or "hwp" in content_type
               or "haansofthwp" in content_type or ".hwp" in cd):
             return extract_text_from_hwp(file_bytes)
@@ -256,10 +290,6 @@ def analyze_with_gemini(text: str, post_url: str, source_name: str) -> Optional[
 
     try:
         genai.configure(api_key=GEMINI_API_KEY)
-        model = genai.GenerativeModel(
-            model_name="gemini-1.5-flash-latest",
-            system_instruction=GEMINI_SYSTEM_PROMPT,
-        )
 
         truncated_text = text[:4000] if len(text) > 4000 else text
         prompt = (
@@ -268,8 +298,24 @@ def analyze_with_gemini(text: str, post_url: str, source_name: str) -> Optional[
             f"공고 텍스트:\n{truncated_text}"
         )
 
-        response = model.generate_content(prompt)
-        raw = response.text.strip()
+        models_to_try = ["gemini-1.5-flash", "gemini-1.5-flash-latest", "gemini-1.5-pro", "gemini-pro"]
+        raw = ""
+        for model_name in models_to_try:
+            try:
+                model = genai.GenerativeModel(
+                    model_name=model_name,
+                    system_instruction=GEMINI_SYSTEM_PROMPT,
+                )
+                response = model.generate_content(prompt)
+                raw = response.text.strip()
+                break
+            except Exception as e:
+                log.debug(f"모델 {model_name} 실패: {e}")
+                continue
+
+        if not raw:
+            log.error("모든 Gemini 모델로 호출을 실패했습니다.")
+            return None
 
         if raw.lower() == "null" or raw == "":
             log.info(f"[{source_name}] Gemini: 지원금 공고 아님 (null)")
@@ -454,6 +500,7 @@ def run_pipeline() -> None:
 
     session = requests.Session()
     session.headers.update(HEADERS)
+    session.verify = False  # SSL 인증서 검증 무시 (강남구 등)
 
     # 기존 데이터 로드
     existing_data: list[dict] = []
