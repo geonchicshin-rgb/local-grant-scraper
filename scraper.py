@@ -306,10 +306,27 @@ def analyze_with_gemini(text: str, post_url: str, source_name: str) -> Optional[
                     for m in genai.list_models() 
                     if 'generateContent' in m.supported_generation_methods and 'gemini' in m.name.lower()
                 ]
-                # flash 모델을 가장 우선적으로 사용하도록 리스트 앞쪽으로 정렬
-                _AVAILABLE_MODELS.sort(key=lambda name: 0 if 'flash' in name.lower() else 1)
                 
-                log.info(f"해당 API KEY로 사용 가능한 Gemini 모델 (우선순위 정렬됨): {_AVAILABLE_MODELS}")
+                # 효율과 성능이 가성비 탑인 안정적 번호의 Flash 모델 최우선 정렬 규칙
+                def _model_priority(name: str) -> int:
+                    name_lower = name.lower()
+                    if name_lower == "gemini-3.1-flash": return 0
+                    if name_lower == "gemini-3-flash": return 1
+                    if name_lower == "gemini-2.5-flash": return 2
+                    if name_lower == "gemini-2.0-flash": return 3
+                    
+                    # 프리뷰, 라이트, 특수모델 후순위
+                    if "flash" in name_lower:
+                        if "preview" in name_lower or "lite" in name_lower or "image" in name_lower or "tts" in name_lower:
+                            return 5
+                        return 4
+                    if "pro" in name_lower:
+                        return 6
+                    return 99
+
+                _AVAILABLE_MODELS.sort(key=_model_priority)
+                
+                log.info(f"해당 API KEY로 사용 가능한 Gemini 모델 (최적 모델 우선정렬): {_AVAILABLE_MODELS[:5]}... (총 {len(_AVAILABLE_MODELS)}개)")
             except Exception as e:
                 log.error(f"모델 목록 조회 실패: {e}")
                 _AVAILABLE_MODELS = ["gemini-1.5-flash", "gemini-pro"]
