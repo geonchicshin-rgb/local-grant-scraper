@@ -97,9 +97,12 @@ jobs:
       - name: 📊 변동 사항 확인
         id: check_changes
         run: |
-          git diff --quiet grants_data.json \
-            && echo "changed=false" >> $GITHUB_OUTPUT \
-            || echo "changed=true" >> $GITHUB_OUTPUT
+          # git status --porcelain 은 신규(untracked) 파일과 수정된 파일 모두 감지
+          if [ -f grants_data.json ] && [ -n "$(git status --porcelain grants_data.json)" ]; then
+            echo "changed=true" >> $GITHUB_OUTPUT
+          else
+            echo "changed=false" >> $GITHUB_OUTPUT
+          fi
 
       - name: 🚀 grants_data.json 자동 커밋 및 푸시
         if: steps.check_changes.outputs.changed == 'true'
