@@ -298,10 +298,22 @@ def analyze_with_gemini(text: str, post_url: str, source_name: str) -> Optional[
             f"공고 텍스트:\n{truncated_text}"
         )
 
-        models_to_try = ["gemini-1.5-flash", "gemini-1.5-flash-latest", "gemini-1.5-pro", "gemini-pro"]
+        global _AVAILABLE_MODELS
+        if '_AVAILABLE_MODELS' not in globals():
+            try:
+                _AVAILABLE_MODELS = [
+                    m.name.replace("models/", "") 
+                    for m in genai.list_models() 
+                    if 'generateContent' in m.supported_generation_methods and 'gemini' in m.name.lower()
+                ]
+                log.info(f"해당 API KEY로 사용 가능한 Gemini 모델: {_AVAILABLE_MODELS}")
+            except Exception as e:
+                log.error(f"모델 목록 조회 실패: {e}")
+                _AVAILABLE_MODELS = ["gemini-1.5-flash", "gemini-pro"]
+
         raw = ""
         last_error = None
-        for model_name in models_to_try:
+        for model_name in _AVAILABLE_MODELS:
             try:
                 model = genai.GenerativeModel(
                     model_name=model_name,
@@ -313,7 +325,7 @@ def analyze_with_gemini(text: str, post_url: str, source_name: str) -> Optional[
                 break
             except Exception as e:
                 last_error = e
-                log.warning(f"모델 {model_name} 다운그레이드 재시도 중... Error: {e}")
+                log.warning(f"모델 {model_name} 호출 오류: {e}")
                 continue
 
         if not raw:
