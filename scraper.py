@@ -251,7 +251,7 @@ def download_and_extract(file_url: str, session: requests.Session) -> Optional[s
     """파일을 다운로드하고 형식에 맞게 텍스트를 추출합니다."""
     try:
         log.info(f"파일 다운로드 중: {file_url}")
-        resp = session.get(file_url, headers=HEADERS, timeout=REQUEST_TIMEOUT, stream=True)
+        resp = session.get(file_url, headers=HEADERS, timeout=REQUEST_TIMEOUT, stream=True, verify=False)
         resp.raise_for_status()
 
         content_type = resp.headers.get("Content-Type", "").lower()
@@ -300,6 +300,7 @@ def analyze_with_gemini(text: str, post_url: str, source_name: str) -> Optional[
 
         models_to_try = ["gemini-1.5-flash", "gemini-1.5-flash-latest", "gemini-1.5-pro", "gemini-pro"]
         raw = ""
+        last_error = None
         for model_name in models_to_try:
             try:
                 model = genai.GenerativeModel(
@@ -308,13 +309,15 @@ def analyze_with_gemini(text: str, post_url: str, source_name: str) -> Optional[
                 )
                 response = model.generate_content(prompt)
                 raw = response.text.strip()
+                last_error = None
                 break
             except Exception as e:
-                log.debug(f"모델 {model_name} 실패: {e}")
+                last_error = e
+                log.warning(f"모델 {model_name} 다운그레이드 재시도 중... Error: {e}")
                 continue
 
         if not raw:
-            log.error("모든 Gemini 모델로 호출을 실패했습니다.")
+            log.error(f"모든 Gemini 모델로 호출을 실패했습니다. 사유: {last_error}")
             return None
 
         if raw.lower() == "null" or raw == "":
@@ -355,7 +358,7 @@ def fetch_board_posts(target: dict, session: requests.Session) -> list[dict]:
 
     try:
         log.info(f"[{name}] 게시판 접근 중: {board_url}")
-        resp = session.get(board_url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
+        resp = session.get(board_url, headers=HEADERS, timeout=REQUEST_TIMEOUT, verify=False)
         resp.raise_for_status()
         resp.encoding = "utf-8"
         soup = BeautifulSoup(resp.text, "html.parser")
@@ -432,7 +435,7 @@ def fetch_post_attachments(
     """게시물 상세 페이지에서 첨부파일(HWP, PDF) URL을 수집합니다."""
     attachment_urls = []
     try:
-        resp = session.get(post_url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
+        resp = session.get(post_url, headers=HEADERS, timeout=REQUEST_TIMEOUT, verify=False)
         resp.raise_for_status()
         resp.encoding = "utf-8"
         soup = BeautifulSoup(resp.text, "html.parser")
@@ -558,7 +561,7 @@ def run_pipeline() -> None:
             else:
                 # 첨부파일 없으면 본문 텍스트 사용
                 try:
-                    resp = session.get(post_url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
+                    resp = session.get(post_url, headers=HEADERS, timeout=REQUEST_TIMEOUT, verify=False)
                     soup = BeautifulSoup(resp.text, "html.parser")
                     area = (
                         soup.find(class_="view_cont")
