@@ -40,15 +40,13 @@ TARGETS = [
     {
         "name": "관악구",
         "base_url": "https://www.gwanak.go.kr",
-        "board_url": "https://www.gwanak.go.kr/site/gwanak/ex/bbs/List.do?cbIdx=1237",
-        # 게시물 제목 링크 셀렉터 (우선순위 순)
+        "board_url": "https://www.gwanak.go.kr/site/gwanak/ex/bbsNew/List.do?typeCode=1",
         "selectors": [
-            "table.board_list tbody tr td.subject a",
-            "table tbody tr td a[href*='View']",
-            "table tbody tr td a[href*='view']",
+            "table tbody tr td.subject a",
+            ".board-list table tbody tr td.subject a",
         ],
-        # 첨부파일 다운로드 링크 키워드
         "attach_keywords": [".hwp", ".pdf", "fileDown", "download", "atch"],
+        "view_url_template": "https://www.gwanak.go.kr/site/gwanak/ex/bbsNew/View.do?not_ancmt_mgt_no={id}&typeCode=1"
     },
     {
         "name": "서초구",
@@ -338,16 +336,27 @@ def fetch_board_posts(target: dict, session: requests.Session) -> list[dict]:
         for a in links:
             try:
                 title = a.get_text(strip=True)
-                href = a["href"]
+                href = a.get("href", "")
+                onclick = a.get("onclick", "")
+                post_url = None
 
-                if href.startswith("/"):
-                    post_url = base_url + href
-                elif href.startswith("http"):
-                    post_url = href
-                else:
-                    post_url = base_url + "/" + href
+                # 1. onclick="fncView('...')" 형태의 ID 추출 (관악구 등)
+                if onclick and "fncView" in onclick:
+                    match = re.search(r"fncView\('(\d+)'\)", onclick)
+                    if match and target.get("view_url_template"):
+                        post_id = match.group(1)
+                        post_url = target["view_url_template"].format(id=post_id)
 
-                if not title or post_url in seen_urls:
+                # 2. 일반 href 속성 처리
+                if not post_url and href and not href.startswith("#"):
+                    if href.startswith("/"):
+                        post_url = base_url + href
+                    elif href.startswith("http"):
+                        post_url = href
+                    else:
+                        post_url = base_url + "/" + href
+
+                if not title or not post_url or post_url in seen_urls:
                     continue
 
                 seen_urls.add(post_url)
