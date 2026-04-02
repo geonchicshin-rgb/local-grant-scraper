@@ -1,0 +1,118 @@
+name: 지자체 공고 자동 수집 파이프라인
+
+on:
+  # 매일 KST 08:00 = UTC 23:00 (전날)
+  schedule:
+    - cron: "0 23 * * *"
+
+  # 수동 실행 허용 (테스트 및 긴급 실행용)
+  workflow_dispatch:
+    inputs:
+      force_refresh:
+        description: "기존 데이터 무시하고 전체 재수집 여부"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+jobs:
+  scrape-and-deploy:
+    name: 공고 수집 및 배포
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    permissions:
+      contents: write  # 자동 커밋을 위한 쓰기 권한
+
+    steps:
+      # ────────────────────────────────────────
+      # 1. 리포지토리 체크아웃
+      # ────────────────────────────────────────
+      - name: 📥 리포지토리 체크아웃
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      # ────────────────────────────────────────
+      # 2. Python 환경 셋업
+      # ────────────────────────────────────────
+      - name: 🐍 Python 3.11 환경 설정
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      # ────────────────────────────────────────
+      # 3. 의존성 설치
+      # ────────────────────────────────────────
+      - name: 📦 의존성 설치
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # ────────────────────────────────────────
+      # 4. hwp5txt CLI 도구 확인
+      # ────────────────────────────────────────
+      - name: 🔧 HWP 변환 도구 확인
+        run: |
+          which hwp5txt || echo "hwp5txt not found, olefile fallback will be used"
+          python -c "import olefile; print('olefile OK')"
+          python -c "import pdfplumber; print('pdfplumber OK')"
+          python -c "import google.generativeai; print('google-generativeai OK')"
+
+      # ────────────────────────────────────────
+      # 5. 강제 초기화 옵션 처리
+      # ────────────────────────────────────────
+      - name: 🗑️ 강제 초기화 (선택 시)
+        if: github.event.inputs.force_refresh == 'true'
+        run: |
+          echo "강제 초기화: grants_data.json 삭제"
+          rm -f grants_data.json
+
+      # ────────────────────────────────────────
+      # 6. 스크래퍼 실행
+      # ────────────────────────────────────────
+      - name: 🔍 공고 수집 파이프라인 실행
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          python scraper.py
+
+      # ────────────────────────────────────────
+      # 7. 로그 아티팩트로 업로드 (디버깅용)
+      # ────────────────────────────────────────
+      - name: 📋 실행 로그 업로드
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scraper-log-${{ github.run_number }}
+          path: scraper.log
+          retention-days: 7
+
+      # ────────────────────────────────────────
+      # 8. 변동 사항 감지 및 자동 커밋·푸시
+      # ────────────────────────────────────────
+      - name: 📊 변동 사항 확인
+        id: check_changes
+        run: |
+          # git status --porcelain 은 신규(untracked) 파일과 수정된 파일 모두 감지
+          if [ -f grants_data.json ] && [ -n "$(git status --porcelain grants_data.json)" ]; then
+            echo "changed=true" >> $GITHUB_OUTPUT
+          else
+            echo "changed=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: 🚀 grants_data.json 자동 커밋 및 푸시
+        if: steps.check_changes.outputs.changed == 'true'
+        run: |
+          git config --local user.name "github-actions[bot]"
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git add grants_data.json
+          git commit -m "chore(data): 자동 업데이트 $(date +'%Y-%m-%d %H:%M KST') [skip ci]"
+          git push
+
+      - name: ✅ 변동 없음 알림
+        if: steps.check_changes.outputs.changed == 'false'
+        run: echo "grants_data.json에 변동 사항이 없습니다. 커밋 생략."
