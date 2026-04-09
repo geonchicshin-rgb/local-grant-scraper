@@ -2,6 +2,7 @@
 지자체 공고 수집 및 AI 정제 파이프라인
 대상: 서울시 관악구 · 서초구 · 강남구 고시/공고 게시판
 출력: grants_data.json (소상공인/자영업자/중소기업 대상 지원금 정보)
+엔진: Antigravity Pro Engine (Gemini 1.5 Pro 기반)
 """
 
 import os
@@ -48,8 +49,11 @@ TARGETS = [
         "base_url": "https://www.gwanak.go.kr",
         "board_url": "https://www.gwanak.go.kr/site/gwanak/ex/bbsNew/List.do?typeCode=1",
         "selectors": [
+            ".table-list td.al a",
+            ".table-list td.subject a",
             "table tbody tr td.subject a",
             ".board-list table tbody tr td.subject a",
+            "#contents .table-list a"
         ],
         "attach_keywords": [".hwp", ".pdf", "fileDown", "download", "atch"],
         "view_url_template": "https://www.gwanak.go.kr/site/gwanak/ex/bbsNew/View.do?not_ancmt_mgt_no={id}&typeCode=1"
@@ -100,16 +104,21 @@ GEMINI_FILTER_PROMPT = """
 """
 
 GEMINI_EXTRACT_PROMPT = """
-당신은 지자체 공고문 분석 전문가입니다.
-주어진 텍스트에서 지원사업의 핵심 정보를 추출하세요. 만일 지원금이나 혜택 정보가 없다면 반드시 null 을 반환하세요.
+당신은 지자체 공고문 분석 전문가이자 'Antigravity Pro Engine'입니다.
+주어진 텍스트에서 지원사업의 핵심 정보를 전문가 수준으로 정밀하게 추출하세요.
+
+지원금이나 실질적 혜택 정보가 없다면 반드시 null 을 반환하세요.
+단순 요약을 넘어, 지원 대상에게 유리한 '가점 포인트'나 '필수 주의사항'이 본문에 있다면 함께 요약에 포함하세요.
+
 JSON 스키마 (코드블록 없이 순수 JSON만 반환):
 {
   "사업명": "사업/공고 전체 명칭",
   "지원대상": "지원 대상 자격 조건 상세",
-  "지원금액_또는_내용": "지원 금액 또는 지원 내용 상세",
+  "지원금액_또는_내용": "지원 금액 또는 지원 내용 상세 (금액 위주)",
   "신청마감일": "YYYY-MM-DD 형식 (불명확하면 '미정')",
   "원본공고링크": "원본 공고 URL",
   "담당부서_연락처": "담당 부서명 및 전화번호",
+  "전략적_팁": "가점 포인트, 준비 서류 중 주의사항, 또는 신청 시 유리한 점 (없으면 '없음')",
   "출처": "수집 출처 구청명"
 }
 """
