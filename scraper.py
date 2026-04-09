@@ -91,6 +91,7 @@ REQUEST_TIMEOUT = 30
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
+TELEGRAM_NOTIFY_STATUS = os.environ.get("TELEGRAM_NOTIFY_STATUS", "true").lower() == "true"
 
 HEADERS = {
     "User-Agent": (
@@ -569,6 +570,24 @@ def send_telegram_message(new_grants: list[dict]) -> None:
     except Exception as e:
         log.error(f"텔레그램 알림 발송 중 예외 발생: {e}")
 
+def send_telegram_status(message: str) -> None:
+    """단순 상태 메시지를 텔레그램으로 전송합니다."""
+    if not TELEGRAM_NOTIFY_STATUS or not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        return
+        
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": message,
+        "parse_mode": "HTML"
+    }
+    try:
+        resp = requests.post(url, json=payload, timeout=10)
+        if resp.status_code != 200:
+            log.debug(f"상태 메시지 전송 실패: {resp.status_code}")
+    except Exception:
+        pass
+
 # # ──────────────────────────────────────────────
 # 메인 파이프라인
 # ──────────────────────────────────────────────
@@ -583,6 +602,9 @@ def run_pipeline() -> None:
     session = requests.Session()
     session.headers.update(HEADERS)
     session.verify = False  # SSL 인증서 검증 무시 (강남구 등)
+
+    # 1. 시작 알림
+    send_telegram_status("🔍 <b>Antigravity Pro 가동</b>: 신규 공고 수집을 시작합니다.")
 
     # 기존 데이터 로드
     existing_data: list[dict] = []
@@ -686,6 +708,8 @@ def run_pipeline() -> None:
         
     if new_grants:
         send_telegram_message(new_grants)
+    else:
+        send_telegram_status("✅ <b>수집 완료</b>: 새로 올라온 지원사업이 없습니다.")
 
     log.info("=" * 60)
     log.info(f"파이프라인 완료")
