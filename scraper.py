@@ -280,36 +280,40 @@ def download_and_extract(file_url: str, session: requests.Session) -> Optional[s
 
 
 # ──────────────────────────────────────────────
-# Gemini AI 필터링 및 구조화
+# Gemini AI 모델 설정 및 상구조화
 # ──────────────────────────────────────────────
+
+def get_best_model(model_type: str = "flash") -> str:
+    """사용 가능한 최신 모델명을 반환합니다."""
+    # 기본 권장 모델
+    if model_type == "pro":
+        return "gemini-1.5-pro"
+    return "gemini-1.5-flash"
 
 def filter_with_flash(title: str, body: str, source_name: str) -> bool:
     if not GEMINI_API_KEY:
         return True
     try:
         genai.configure(api_key=GEMINI_API_KEY)
-        truncated = body[:500] if len(body) > 500 else body
+        truncated = body[:1000] if len(body) > 1000 else body
         prompt = f"""출처: {source_name}
 제목: {title}
 요약: {truncated}"""
         
-        models = [m.name.replace("models/", "") for m in genai.list_models() if 'flash' in m.name.lower()]
-        flash_model = "gemini-1.5-flash"
-        if any("3.1-flash" in m for m in models):
-            flash_model = next((m for m in models if "3.1-flash" in m), flash_model)
-        elif any("2.5-flash" in m for m in models):
-            flash_model = next((m for m in models if "2.5-flash" in m), flash_model)
-            
-        model = genai.GenerativeModel(model_name=flash_model, system_instruction=GEMINI_FILTER_PROMPT)
+        model_name = get_best_model("flash")
+        model = genai.GenerativeModel(model_name=model_name, system_instruction=GEMINI_FILTER_PROMPT)
         resp = model.generate_content(prompt)
         res = resp.text.strip().upper()
         
         if "TRUE" in res:
             return True
-        log.info(f"[{source_name}][필터링됨] Flash 판단: 대상 아님 ({title})")
+        log.info(f"[{source_name}][필터링됨] AI 판단: 대상 아님 ({title})")
         return False
     except Exception as e:
-        log.warning(f"Flash 필터 실패(통과처리): {e}")
+        if "429" in str(e):
+            log.error(f"Gemini API 한도 초과 (429): 결제 수단 또는 한도를 확인하세요.")
+        else:
+            log.warning(f"AI 필터 실패(통과처리): {e}")
         return True
 
 def extract_with_pro(text: str, post_url: str, source_name: str) -> Optional[dict]:
@@ -318,22 +322,15 @@ def extract_with_pro(text: str, post_url: str, source_name: str) -> Optional[dic
         return None
     try:
         genai.configure(api_key=GEMINI_API_KEY)
-        truncated = text[:4000] if len(text) > 4000 else text
+        truncated = text[:10000] if len(text) > 10000 else text
         prompt = f"""출처: {source_name}
 원본공고링크: {post_url}
 
 공고 본문:
 {truncated}"""
         
-        models = [m.name.replace("models/", "") for m in genai.list_models() if 'pro' in m.name.lower() or 'flash' in m.name.lower()]
-        
-        pro_model = "gemini-pro"
-        if any("3.1-pro" in m for m in models):
-            pro_model = next((m for m in models if "3.1-pro" in m), pro_model)
-        elif any("1.5-pro" in m for m in models):
-            pro_model = next((m for m in models if "1.5-pro" in m), pro_model)
-            
-        model = genai.GenerativeModel(model_name=pro_model, system_instruction=GEMINI_EXTRACT_PROMPT)
+        model_name = get_best_model("pro")
+        model = genai.GenerativeModel(model_name=model_name, system_instruction=GEMINI_EXTRACT_PROMPT)
         resp = model.generate_content(prompt)
         raw = resp.text.strip()
         
@@ -348,10 +345,13 @@ def extract_with_pro(text: str, post_url: str, source_name: str) -> Optional[dic
         parsed = json.loads(raw)
         parsed["원본공고링크"] = post_url
         parsed["출처"] = source_name
-        log.info(f"[{source_name}] Pro 추출 완료: {parsed.get('사업명', '미상')}")
+        log.info(f"[{source_name}] AI 추출 완료: {parsed.get('사업명', '미상')}")
         return parsed
     except Exception as e:
-        log.error(f"Pro 추출 에러: {e}")
+        if "429" in str(e):
+            log.error(f"Gemini API 한도 초과 (429): AI Studio의 Spending Cap 설정을 확인해 주세요.")
+        else:
+            log.error(f"AI 추출 에러: {e}")
         return None
 
 
