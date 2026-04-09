@@ -283,12 +283,34 @@ def download_and_extract(file_url: str, session: requests.Session) -> Optional[s
 # Gemini AI 모델 설정 및 상구조화
 # ──────────────────────────────────────────────
 
+_AVAILABLE_MODELS_CACHE: list[str] = []
+
 def get_best_model(model_type: str = "flash") -> str:
-    """사용 가능한 최신 모델명을 반환합니다."""
-    # 기본 권장 모델
+    """사용자 계정에서 사용 가능한 가장 좋은 모델명을 동적으로 반환합니다."""
+    global _AVAILABLE_MODELS_CACHE
+    
+    if not _AVAILABLE_MODELS_CACHE:
+        try:
+            log.info("사용 가능한 Gemini 모델 목록 조회 중...")
+            model_list = [m.name.replace("models/", "") for m in genai.list_models()]
+            _AVAILABLE_MODELS_CACHE = model_list
+            log.debug(f"감지된 모델: {', '.join(model_list)}")
+        except Exception as e:
+            log.warning(f"모델 목록 조회 실패 (기본값 사용): {e}")
+            return "gemini-1.5-pro" if model_type == "pro" else "gemini-1.5-flash"
+
+    # 우선 순서대로 매칭
     if model_type == "pro":
-        return "gemini-1.5-pro"
-    return "gemini-1.5-flash"
+        priorities = ["gemini-3.1-pro", "gemini-1.5-pro", "gemini-pro"]
+    else:
+        priorities = ["gemini-3.1-flash", "gemini-1.5-flash", "gemini-1.5-flash-latest"]
+
+    for p in priorities:
+        if any(p in m for m in _AVAILABLE_MODELS_CACHE):
+            target = next(m for m in _AVAILABLE_MODELS_CACHE if p in m)
+            return target
+
+    return priorities[1] # 못 찾으면 기본값(1.5) 반환
 
 def filter_with_flash(title: str, body: str, source_name: str) -> bool:
     if not GEMINI_API_KEY:
