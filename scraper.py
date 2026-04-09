@@ -24,6 +24,10 @@ import requests
 from bs4 import BeautifulSoup
 import pdfplumber
 import google.generativeai as genai
+from dotenv import load_dotenv
+
+# .env 파일 로드 (로컬 테스트용)
+load_dotenv()
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
