@@ -13,6 +13,7 @@ import tempfile
 import time
 import zipfile
 import xml.etree.ElementTree as ET
+import html
 import urllib3
 from datetime import datetime
 from pathlib import Path
@@ -80,6 +81,8 @@ TARGETS = [
 OUTPUT_FILE = Path("grants_data.json")
 REQUEST_TIMEOUT = 30
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
 HEADERS = {
     "User-Agent": (
@@ -90,15 +93,15 @@ HEADERS = {
     "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8",
 }
 
-GEMINI_SYSTEM_PROMPT = """
+GEMINI_FILTER_PROMPT = """
+당신은 지자체 공고문 필터링 전문가입니다.
+주어진 공고 제목과 짧은 본문 요약을 보고, 이 게시물이 '소상공인, 자영업자, 중소기업, 창업'을 대상으로 하는 '지원금, 보조금, 혜택, 융자, 교육지원, 컨설팅 등'의 실질적 지원사업 공고인지 판단하세요.
+만약 대상 공고가 맞다면 "TRUE", 관련 없는 공고이면 "FALSE" 라고만 응답하세요.
+"""
+
+GEMINI_EXTRACT_PROMPT = """
 당신은 지자체 공고문 분석 전문가입니다.
-주어진 텍스트가 '소상공인, 자영업자, 중소기업'을 대상으로 하는 
-'지원금, 보조금, 환급금, 융자, 지원사업' 공고인지 판단하세요.
-
-판단 기준:
-- 대상이 아닌 경우: 정확히 null 단어만 반환 (다른 텍스트 없이)
-- 대상인 경우: 아래 JSON 스키마로 정확히 구조화하여 반환
-
+주어진 텍스트에서 지원사업의 핵심 정보를 추출하세요. 만일 지원금이나 혜택 정보가 없다면 반드시 null 을 반환하세요.
 JSON 스키마 (코드블록 없이 순수 JSON만 반환):
 {
   "사업명": "사업/공고 전체 명칭",
@@ -109,8 +112,6 @@ JSON 스키마 (코드블록 없이 순수 JSON만 반환):
   "담당부서_연락처": "담당 부서명 및 전화번호",
   "출처": "수집 출처 구청명"
 }
-
-반드시 유효한 JSON 또는 null 만 반환하세요.
 """
 
 
@@ -282,97 +283,75 @@ def download_and_extract(file_url: str, session: requests.Session) -> Optional[s
 # Gemini AI 필터링 및 구조화
 # ──────────────────────────────────────────────
 
-def analyze_with_gemini(text: str, post_url: str, source_name: str) -> Optional[dict]:
-    """Gemini API로 텍스트를 분석하여 지원금 공고 여부를 판단하고 구조화합니다."""
+def filter_with_flash(title: str, body: str, source_name: str) -> bool:
     if not GEMINI_API_KEY:
-        log.error("GEMINI_API_KEY 환경변수가 설정되지 않았습니다.")
-        return None
-
+        return True
     try:
         genai.configure(api_key=GEMINI_API_KEY)
+        truncated = body[:500] if len(body) > 500 else body
+        prompt = f"""출처: {source_name}
+제목: {title}
+요약: {truncated}"""
+        
+        models = [m.name.replace("models/", "") for m in genai.list_models() if 'flash' in m.name.lower()]
+        flash_model = "gemini-1.5-flash"
+        if any("3.1-flash" in m for m in models):
+            flash_model = next((m for m in models if "3.1-flash" in m), flash_model)
+        elif any("2.5-flash" in m for m in models):
+            flash_model = next((m for m in models if "2.5-flash" in m), flash_model)
+            
+        model = genai.GenerativeModel(model_name=flash_model, system_instruction=GEMINI_FILTER_PROMPT)
+        resp = model.generate_content(prompt)
+        res = resp.text.strip().upper()
+        
+        if "TRUE" in res:
+            return True
+        log.info(f"[{source_name}][필터링됨] Flash 판단: 대상 아님 ({title})")
+        return False
+    except Exception as e:
+        log.warning(f"Flash 필터 실패(통과처리): {e}")
+        return True
 
-        truncated_text = text[:4000] if len(text) > 4000 else text
-        prompt = (
-            f"출처: {source_name}청\n"
-            f"원본공고링크: {post_url}\n\n"
-            f"공고 텍스트:\n{truncated_text}"
-        )
+def extract_with_pro(text: str, post_url: str, source_name: str) -> Optional[dict]:
+    if not GEMINI_API_KEY:
+        log.error("GEMINI_API_KEY 없음")
+        return None
+    try:
+        genai.configure(api_key=GEMINI_API_KEY)
+        truncated = text[:4000] if len(text) > 4000 else text
+        prompt = f"""출처: {source_name}
+원본공고링크: {post_url}
 
-        global _AVAILABLE_MODELS
-        if '_AVAILABLE_MODELS' not in globals():
-            try:
-                _AVAILABLE_MODELS = [
-                    m.name.replace("models/", "") 
-                    for m in genai.list_models() 
-                    if 'generateContent' in m.supported_generation_methods and 'gemini' in m.name.lower()
-                ]
-                
-                # 효율과 성능이 가성비 탑인 안정적 번호의 Flash 모델 최우선 정렬 규칙
-                def _model_priority(name: str) -> int:
-                    name_lower = name.lower()
-                    if name_lower == "gemini-3.1-flash": return 0
-                    if name_lower == "gemini-3-flash": return 1
-                    if name_lower == "gemini-2.5-flash": return 2
-                    if name_lower == "gemini-2.0-flash": return 3
-                    
-                    # 프리뷰, 라이트, 특수모델 후순위
-                    if "flash" in name_lower:
-                        if "preview" in name_lower or "lite" in name_lower or "image" in name_lower or "tts" in name_lower:
-                            return 5
-                        return 4
-                    if "pro" in name_lower:
-                        return 6
-                    return 99
-
-                _AVAILABLE_MODELS.sort(key=_model_priority)
-                
-                log.info(f"해당 API KEY로 사용 가능한 Gemini 모델 (최적 모델 우선정렬): {_AVAILABLE_MODELS[:5]}... (총 {len(_AVAILABLE_MODELS)}개)")
-            except Exception as e:
-                log.error(f"모델 목록 조회 실패: {e}")
-                _AVAILABLE_MODELS = ["gemini-1.5-flash", "gemini-pro"]
-
-        raw = ""
-        last_error = None
-        for model_name in _AVAILABLE_MODELS:
-            try:
-                model = genai.GenerativeModel(
-                    model_name=model_name,
-                    system_instruction=GEMINI_SYSTEM_PROMPT,
-                )
-                response = model.generate_content(prompt)
-                raw = response.text.strip()
-                last_error = None
-                break
-            except Exception as e:
-                last_error = e
-                log.warning(f"모델 {model_name} 호출 오류: {e}")
-                continue
-
-        if not raw:
-            log.error(f"모든 Gemini 모델로 호출을 실패했습니다. 사유: {last_error}")
+공고 본문:
+{truncated}"""
+        
+        models = [m.name.replace("models/", "") for m in genai.list_models() if 'pro' in m.name.lower() or 'flash' in m.name.lower()]
+        
+        pro_model = "gemini-pro"
+        if any("3.1-pro" in m for m in models):
+            pro_model = next((m for m in models if "3.1-pro" in m), pro_model)
+        elif any("1.5-pro" in m for m in models):
+            pro_model = next((m for m in models if "1.5-pro" in m), pro_model)
+            
+        model = genai.GenerativeModel(model_name=pro_model, system_instruction=GEMINI_EXTRACT_PROMPT)
+        resp = model.generate_content(prompt)
+        raw = resp.text.strip()
+        
+        if "null" in raw.lower() and len(raw) < 10:
             return None
-
-        if raw.lower() == "null" or raw == "":
-            log.info(f"[{source_name}] Gemini: 지원금 공고 아님 (null)")
-            return None
-
-        # 코드블록 제거
+            
         if raw.startswith("```"):
             lines = raw.split("\n")
             raw = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
-
+            
+        import json
         parsed = json.loads(raw)
-        # 필수 필드 보정
         parsed["원본공고링크"] = post_url
         parsed["출처"] = source_name
-        log.info(f"[{source_name}] 지원금 공고 감지 → {parsed.get('사업명', '미상')}")
+        log.info(f"[{source_name}] Pro 추출 완료: {parsed.get('사업명', '미상')}")
         return parsed
-
-    except json.JSONDecodeError as e:
-        log.error(f"Gemini 응답 JSON 파싱 실패: {e}\n응답: {raw[:200]}")
-        return None
     except Exception as e:
-        log.error(f"Gemini API 호출 중 오류: {e}")
+        log.error(f"Pro 추출 에러: {e}")
         return None
 
 
@@ -522,7 +501,40 @@ def fetch_post_attachments(
     return list(set(attachment_urls))
 
 
-# ──────────────────────────────────────────────
+def send_telegram_message(new_grants: list[dict]) -> None:
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        log.warning("텔레그램 토큰 또는 Chat ID가 설정되지 않아 알림을 스킵합니다.")
+        return
+        
+    if not new_grants:
+        return
+        
+    text = f"🔔 오늘의 신규 지원사업: {len(new_grants)}건\n\n"
+    for idx, item in enumerate(new_grants, 1):
+        name = html.escape(item.get('사업명', '미상'))
+        src = html.escape(item.get('출처', '미상'))
+        deadline = html.escape(item.get('신청마감일', '미정'))
+        text += f"{idx}. [{src}] <b>{name}</b>\n⏳ 마감: {deadline}\n\n"
+        
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": text,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": False
+    }
+    
+    try:
+        resp = requests.post(url, json=payload, timeout=10)
+        if resp.status_code != 200:
+            log.error(f"텔레그램 알림 발송 실패 (Status: {resp.status_code})")
+            log.error(f"응답 본문: {resp.text}")
+        else:
+            log.info("텔레그램 알림 발송 성공!")
+    except Exception as e:
+        log.error(f"텔레그램 알림 발송 중 예외 발생: {e}")
+
+# # ──────────────────────────────────────────────
 # 메인 파이프라인
 # ──────────────────────────────────────────────
 
@@ -576,47 +588,53 @@ def run_pipeline() -> None:
 
             log.info(f"[{name}][처리중] {post_title[:35]}")
 
-            # 첨부파일 수집
+            # 본문 추출 (Flash 필터링 용도)
+            body_text = ""
+            try:
+                resp = session.get(post_url, headers=HEADERS, timeout=REQUEST_TIMEOUT, verify=False)
+                soup = BeautifulSoup(resp.text, "html.parser")
+                area = (
+                    soup.find(class_="view_cont")
+                    or soup.find(class_="bbs_view")
+                    or soup.find(class_="view-content")
+                    or soup.find("article")
+                    or soup.find(id="content")
+                )
+                if area:
+                    body_text = area.get_text(separator="\n", strip=True)
+            except Exception as e:
+                log.error(f"본문 추출 에러: {e}")
+                
+            # Flash 모델로 1차 필터링
+            is_target = filter_with_flash(post_title, body_text, name)
+            
+            if not is_target:
+                continue
+                
+            # 타겟 공고로 확인된 경우, 첨부파일 수집 및 Pro 모델 가동
             attachments = fetch_post_attachments(
                 post_url, base_url, attach_keywords, session
             )
 
             extracted_texts: list[str] = []
-
-            # 첨부파일 텍스트 추출
             if attachments:
                 for file_url in attachments:
                     text = download_and_extract(file_url, session)
                     if text:
                         extracted_texts.append(text)
                     time.sleep(0.5)
-            else:
-                # 첨부파일 없으면 본문 텍스트 사용
-                try:
-                    resp = session.get(post_url, headers=HEADERS, timeout=REQUEST_TIMEOUT, verify=False)
-                    soup = BeautifulSoup(resp.text, "html.parser")
-                    area = (
-                        soup.find(class_="view_cont")
-                        or soup.find(class_="bbs_view")
-                        or soup.find(class_="view-content")
-                        or soup.find("article")
-                        or soup.find(id="content")
-                    )
-                    if area:
-                        body = area.get_text(separator="\n", strip=True)
-                        if body.strip():
-                            extracted_texts.append(body)
-                except Exception as e:
-                    log.error(f"본문 추출 실패: {e}")
+            
+            if body_text.strip() and not extracted_texts:
+                extracted_texts.append(body_text)
 
-            # Gemini 분석
+            # Gemini Pro 구조화
             for text in extracted_texts:
                 if len(text.strip()) < 50:
                     continue
-                result = analyze_with_gemini(text, post_url, name)
+                result = extract_with_pro(text, post_url, name)
                 if result:
                     new_grants.append(result)
-                    break
+                    break # 하나라도 성공하면 완료
                 time.sleep(1)
 
             time.sleep(1)  # 게시물 간 딜레이
@@ -630,6 +648,9 @@ def run_pipeline() -> None:
 
     with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
         json.dump(final_data, f, ensure_ascii=False, indent=2)
+        
+    if new_grants:
+        send_telegram_message(new_grants)
 
     log.info("=" * 60)
     log.info(f"파이프라인 완료")
